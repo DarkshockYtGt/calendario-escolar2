@@ -988,6 +988,50 @@
           </div>
         </div>
       </section>
+      <section class="view" id="view-chat">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>Chat</h2>
+              <div class="sub">Converse com outras pessoas — crie conta apenas com seu nome.</div>
+            </div>
+            <div class="chips">
+              <span class="chip" id="chatUserChip">Anônimo</span>
+            </div>
+          </div>
+
+          <div class="content" style="padding:0;">
+            <style>
+              .chat-wrap{display:flex;flex-direction:column;height:64vh}
+              .chat-messages{flex:1 1 auto;padding:12px;overflow:auto;background:var(--surface-2)}
+              .chat-input{display:flex;gap:8px;padding:10px;border-top:1px solid var(--line);background:var(--surface)}
+              .chat-bubble{max-width:74%;padding:10px 12px;border-radius:16px;margin:6px 0;display:inline-block}
+              .chat-bubble.me{background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;border-bottom-right-radius:4px;margin-left:auto}
+              .chat-bubble.other{background:var(--surface);color:var(--text);border:1px solid var(--line);border-bottom-left-radius:4px}
+              .chat-meta{font-size:.68rem;color:var(--muted);margin-bottom:6px}
+              .login-row{display:flex;gap:8px;padding:10px;border-bottom:1px solid var(--line);background:var(--surface-2);align-items:center}
+              .login-row input{flex:1}
+              .chat-empty{padding:18px;text-align:center;color:var(--muted)}
+            </style>
+
+            <div class="chat-wrap">
+              <div class="login-row" id="chatAuthRow">
+                <input id="chatNameInput" placeholder="Seu nome (ex: João)" />
+                <button class="ghost-btn" id="chatLoginBtn">Entrar</button>
+                <button class="primary-btn" id="chatCreateBtn">Criar conta</button>
+                <button class="ghost-btn" id="chatLogoutBtn" style="display:none">Sair</button>
+              </div>
+
+              <div class="chat-messages" id="chatMessages"></div>
+
+              <div class="chat-input">
+                <input id="chatMessageInput" placeholder="Escreva uma mensagem..." />
+                <button class="primary-btn" id="chatSendBtn">Enviar</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
 
     <nav class="bottom-nav">
@@ -1002,6 +1046,10 @@
       <button class="tab-btn" id="tabPending">
         <div class="icon">📝</div>
         <div class="label">Tarefas</div>
+      </button>
+      <button class="tab-btn" id="tabChat">
+        <div class="icon">💬</div>
+        <div class="label">Chat</div>
       </button>
     </nav>
   </div>
@@ -1996,6 +2044,166 @@
       });
     });
   }
+</script>
+<script>
+// Chat feature: simple name-only auth + Firestore realtime messages
+(function(){
+  const elTabChat = document.getElementById('tabChat');
+  const elViewChat = document.getElementById('view-chat');
+  const elChatUserChip = document.getElementById('chatUserChip');
+  const chatNameInput = document.getElementById('chatNameInput');
+  const chatLoginBtn = document.getElementById('chatLoginBtn');
+  const chatCreateBtn = document.getElementById('chatCreateBtn');
+  const chatLogoutBtn = document.getElementById('chatLogoutBtn');
+  const chatMessages = document.getElementById('chatMessages');
+  const chatMessageInput = document.getElementById('chatMessageInput');
+  const chatSendBtn = document.getElementById('chatSendBtn');
+
+  if(elTabChat){
+    elTabChat.addEventListener('click', ()=>{
+      setActiveTab('chat');
+      renderChat();
+    });
+  }
+
+  const prevSetActive = window.setActiveTab;
+  window.setActiveTab = function(tab){
+    prevSetActive(tab);
+    if(tab === 'chat'){
+      if(elViewChat) elViewChat.classList.add('active');
+    } else {
+      if(elViewChat) elViewChat.classList.remove('active');
+    }
+  };
+
+  const CHAT_USER_KEY = 'calendario_chat_user';
+  let chatUser = null;
+
+  function loadChatUser(){
+    try{ chatUser = JSON.parse(localStorage.getItem(CHAT_USER_KEY)); }catch{};
+    updateAuthUI();
+  }
+  function saveChatUser(){
+    try{ localStorage.setItem(CHAT_USER_KEY, JSON.stringify(chatUser)); }catch{};
+    updateAuthUI();
+  }
+  function clearChatUser(){
+    chatUser = null; localStorage.removeItem(CHAT_USER_KEY); updateAuthUI();
+  }
+
+  function updateAuthUI(){
+    if(chatUser && chatUser.name){
+      elChatUserChip.textContent = chatUser.name;
+      chatNameInput.value = chatUser.name;
+      chatLoginBtn.style.display = 'none';
+      chatCreateBtn.style.display = 'none';
+      chatLogoutBtn.style.display = '';
+      chatMessageInput.disabled = false;
+      chatSendBtn.disabled = false;
+    } else {
+      elChatUserChip.textContent = 'Anônimo';
+      chatLoginBtn.style.display = '';
+      chatCreateBtn.style.display = '';
+      chatLogoutBtn.style.display = 'none';
+      chatMessageInput.disabled = true;
+      chatSendBtn.disabled = true;
+    }
+  }
+
+  async function ensureUserInDb(name){
+    if(!window.__db) return;
+    const usersRef = window.__db.collection('chatUsers');
+    const q = await usersRef.where('name','==',name).limit(1).get();
+    if(q.empty){
+      await usersRef.add({ name, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+    }
+  }
+
+  chatCreateBtn.onclick = async ()=>{
+    const name = (chatNameInput.value || '').trim();
+    if(!name) return showToast('Digite um nome para criar conta');
+    chatUser = { name };
+    saveChatUser();
+    await ensureUserInDb(name);
+    showToast('Conta criada como ' + name);
+    startChatListener();
+  };
+
+  chatLoginBtn.onclick = async ()=>{
+    const name = (chatNameInput.value || '').trim();
+    if(!name) return showToast('Digite seu nome para entrar');
+    if(window.__db){
+      const usersRef = window.__db.collection('chatUsers');
+      const q = await usersRef.where('name','==',name).limit(1).get();
+      if(q.empty){
+        if(!confirm('Usuário não encontrado. Deseja criar conta com esse nome?')) return;
+        await usersRef.add({ name, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+      }
+    }
+    chatUser = { name };
+    saveChatUser();
+    showToast('Entrou como ' + name);
+    startChatListener();
+  };
+
+  chatLogoutBtn.onclick = ()=>{
+    clearChatUser();
+    showToast('Desconectado');
+    stopChatListener();
+  };
+
+  chatSendBtn.onclick = sendChatMessage;
+  chatMessageInput.addEventListener('keydown', e => { if(e.key === 'Enter') sendChatMessage(); });
+
+  function appendMessage(doc){
+    const data = doc.data ? doc.data() : doc;
+    const name = data.name || 'Anônimo';
+    const text = data.text || '';
+    const ts = data.createdAt && data.createdAt.toDate ? data.createdAt.toDate() : (data.createdAt ? new Date(data.createdAt) : new Date());
+    const me = chatUser && chatUser.name === name;
+    const wrap = document.createElement('div');
+    const meta = document.createElement('div'); meta.className = 'chat-meta'; meta.textContent = `${name} • ${ts.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}`;
+    const bubble = document.createElement('div'); bubble.className = 'chat-bubble ' + (me ? 'me' : 'other'); bubble.textContent = text;
+    wrap.appendChild(meta); wrap.appendChild(bubble);
+    chatMessages.appendChild(wrap);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+
+  let chatUnsub = null;
+  function startChatListener(){
+    if(!window.__db) return;
+    const ref = window.__db.collection('chatMessages').orderBy('createdAt','asc').limit(500);
+    if(chatUnsub) chatUnsub();
+    chatMessages.innerHTML = '';
+    chatUnsub = ref.onSnapshot(snap => {
+      chatMessages.innerHTML = '';
+      snap.docs.forEach(doc => appendMessage(doc));
+    }, err => {
+      console.warn('Erro ao ouvir chat:', err);
+    });
+  }
+  function stopChatListener(){ if(chatUnsub){ chatUnsub(); chatUnsub = null; chatMessages.innerHTML = ''; } }
+
+  async function sendChatMessage(){
+    const text = (chatMessageInput.value || '').trim();
+    if(!text) return;
+    if(!chatUser || !chatUser.name){ showToast('Faça login antes de enviar mensagens'); return; }
+    if(!window.__db){ showToast('Banco não disponível. O chat precisa de Firestore.'); return; }
+    try{
+      await window.__db.collection('chatMessages').add({ name: chatUser.name, text, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+      chatMessageInput.value = '';
+    }catch(err){ console.error(err); showToast('Erro ao enviar mensagem'); }
+  }
+
+  function renderChat(){
+    loadChatUser();
+    if(chatUser && window.__db) startChatListener();
+  }
+
+  // init
+  loadChatUser();
+  if(chatUser && window.__db) startChatListener();
+})();
 </script>
 </body>
 </html>
