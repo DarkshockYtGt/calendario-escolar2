@@ -2104,7 +2104,6 @@
   const elChatUserChip = document.getElementById('chatUserChip');
   const chatNameInput = document.getElementById('chatNameInput');
   const chatLoginBtn = document.getElementById('chatLoginBtn');
-  const chatCreateBtn = document.getElementById('chatCreateBtn');
   const chatLogoutBtn = document.getElementById('chatLogoutBtn');
   const chatMessages = document.getElementById('chatMessages');
   const chatMessageInput = document.getElementById('chatMessageInput');
@@ -2203,58 +2202,21 @@
       elChatUserChip.textContent = chatUser.name;
       chatNameInput.value = chatUser.name;
       chatLoginBtn.style.display = 'none';
-      chatCreateBtn.style.display = 'none';
       chatLogoutBtn.style.display = '';
       chatMessageInput.disabled = false;
       chatSendBtn.disabled = false;
     } else {
       elChatUserChip.textContent = 'Anônimo';
       chatLoginBtn.style.display = '';
-      chatCreateBtn.style.display = '';
       chatLogoutBtn.style.display = 'none';
       chatMessageInput.disabled = true;
       chatSendBtn.disabled = true;
     }
   }
 
-  async function ensureUserInDb(name){
-    if(!window.__db) return;
-    try {
-      const usersRef = window.__db.collection('chatUsers');
-      const q = await usersRef.where('name','==',name).limit(1).get();
-      if(q.empty){
-        await usersRef.add({ name, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
-      }
-    } catch(err) {
-      if(!permissionDenied(err)) console.warn('Não foi possível validar o usuário em nuvem:', err);
-    }
-  }
-
-  chatCreateBtn.onclick = async ()=>{
-    const name = (chatNameInput.value || '').trim();
-    if(!name) return window.showToast('Digite um nome para criar conta');
-    chatUser = { name };
-    saveChatUser();
-    await ensureUserInDb(name);
-    window.showToast('Conta criada como ' + name);
-    startChatListener();
-  };
-
   chatLoginBtn.onclick = async ()=>{
     const name = (chatNameInput.value || '').trim();
     if(!name) return window.showToast('Digite seu nome para entrar');
-    if(window.__db){
-      try {
-        const usersRef = window.__db.collection('chatUsers');
-        const q = await usersRef.where('name','==',name).limit(1).get();
-        if(q.empty){
-          if(!confirm('Usuário não encontrado. Deseja criar conta com esse nome?')) return;
-          await usersRef.add({ name, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
-        }
-      } catch(err) {
-        if(!permissionDenied(err)) console.warn('Não foi possível consultar usuários em nuvem:', err);
-      }
-    }
     chatUser = { name };
     saveChatUser();
     window.showToast('Entrou como ' + name);
