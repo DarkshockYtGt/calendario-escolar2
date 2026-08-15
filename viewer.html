@@ -687,16 +687,25 @@
       height:var(--nav-h);
       border-top:1px solid var(--line);
       background: color-mix(in srgb, var(--surface) 94%, transparent);
-      display:grid;
-      grid-template-columns:repeat(3, minmax(0, 1fr));
-      gap:6px;
+      display:flex;
+      align-items:stretch;
+      gap:8px;
       padding:8px 10px 12px;
+      overflow-x:auto;
+      overflow-y:hidden;
+      scroll-snap-type:x proximity;
+      scroll-behavior:smooth;
+      -webkit-overflow-scrolling:touch;
+      overscroll-behavior-x: contain;
+      scrollbar-width:none;
+      -ms-overflow-style:none;
       backdrop-filter: blur(10px);
       z-index:20;
     }
+    .bottom-nav::-webkit-scrollbar{ display:none; }
 
     body.viewer-mode .bottom-nav{
-      grid-template-columns:repeat(2, minmax(0, 1fr));
+      justify-content:flex-start;
     }
 
     body.viewer-mode #tabTask,
@@ -709,6 +718,8 @@
     }
 
     .tab-btn{
+      flex:1 0 88px;
+      min-width:88px;
       display:flex;
       flex-direction:column;
       align-items:center;
@@ -719,6 +730,9 @@
       color:var(--muted);
       border:1px solid transparent;
       cursor:pointer;
+      padding:8px 10px 6px;
+      scroll-snap-align:start;
+      transition:transform .15s ease, background .15s ease, border-color .15s ease;
     }
 
     .tab-btn .icon{ font-size:1.02rem; line-height:1; }
@@ -1023,11 +1037,11 @@
         <div class="card">
           <div class="card-head">
             <div>
-              <h2>Chat</h2>
-              <div class="sub">Converse com outras pessoas — crie conta apenas com seu nome.</div>
+              <h2>Avisos</h2>
+              <div class="sub">Escreva quem está falando, e depois envie seu aviso</div>
             </div>
             <div class="chips">
-              <span class="chip" id="chatUserChip">Anônimo</span>
+              <span class="chip" id="chatUserChip">---</span>
             </div>
           </div>
 
@@ -1204,9 +1218,11 @@
     tabCalendar: document.getElementById('tabCalendar'),
     tabTask: document.getElementById('tabTask'),
     tabPending: document.getElementById('tabPending'),
+    tabChat: document.getElementById('tabChat'),
     viewCalendar: document.getElementById('view-calendar'),
     viewTask: document.getElementById('view-task'),
     viewPending: document.getElementById('view-pending'),
+    viewChat: document.getElementById('view-chat'),
     taskSubject: document.getElementById('taskSubject'),
     taskMode: document.getElementById('taskMode'),
     taskDay: document.getElementById('taskDay'),
@@ -1349,6 +1365,7 @@
     clearTimeout(window.__toast);
     window.__toast = setTimeout(() => el.toast.classList.remove('show'), 1600);
   }
+  window.showToast = showToast;
 
   function applyTheme(){
     const isDark = theme === 'dark' || (theme === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
@@ -1647,14 +1664,16 @@
     const todayIdx = (new Date().getDay() + 6) % 7;
     const todayCount = state.tasks.filter(t => t.weekOffset === 0 && t.mode === 'day' && Number(t.day) === todayIdx).length;
     const done = total ? Math.round((state.tasks.filter(t => taskStatus(t) === 'concluído').length / total) * 100) : 0;
-    el.statTotal.textContent = total;
-    el.statToday.textContent = todayCount;
-    el.statDone.textContent = `${done}%`;
-    el.weekLabel.textContent = weekTitle(currentWeekOffset);
-    el.weekRangeChip.textContent = formatRangeForWeek(currentWeekOffset);
-    el.headerSubtitle.textContent = IS_VIEWER
-      ? `${weekTitle(currentWeekOffset)} • o viewer mostra todas as tarefas como não feitas`
-      : `${weekTitle(currentWeekOffset)} • toque em uma aula para criar tarefa`;
+    if (el.statTotal) el.statTotal.textContent = total;
+    if (el.statToday) el.statToday.textContent = todayCount;
+    if (el.statDone) el.statDone.textContent = `${done}%`;
+    if (el.weekLabel) el.weekLabel.textContent = weekTitle(currentWeekOffset);
+    if (el.weekRangeChip) el.weekRangeChip.textContent = formatRangeForWeek(currentWeekOffset);
+    if (el.headerSubtitle) {
+      el.headerSubtitle.textContent = IS_VIEWER
+        ? `${weekTitle(currentWeekOffset)} • Pedro Leal`
+        : `${weekTitle(currentWeekOffset)} • toque em uma aula para criar tarefa`;
+    }
   }
 
   function renderTaskPreview(){
@@ -1678,10 +1697,12 @@
     el.viewCalendar.classList.toggle('active', tab === 'calendar');
     el.viewTask.classList.toggle('active', tab === 'task');
     el.viewPending.classList.toggle('active', tab === 'pending');
+    if (el.viewChat) el.viewChat.classList.toggle('active', tab === 'chat');
 
     el.tabCalendar.classList.toggle('active', tab === 'calendar');
     el.tabTask.classList.toggle('active', tab === 'task');
     el.tabPending.classList.toggle('active', tab === 'pending');
+    if (el.tabChat) el.tabChat.classList.toggle('active', tab === 'chat');
 
     if(tab === 'calendar'){
       el.taskFillChip.textContent = 'Pronto para usar';
@@ -2071,6 +2092,7 @@
   updateStats();
   setActiveTab('calendar');
 
+  window.setActiveTab = setActiveTab;
   saveState();
   listenToCloud();
 })();
@@ -2089,6 +2111,58 @@
   const chatMessageInput = document.getElementById('chatMessageInput');
   const chatSendBtn = document.getElementById('chatSendBtn');
 
+  const CHAT_USER_KEY = 'calendario_chat_user';
+  const CHAT_LOCAL_KEY = 'calendario_chat_local_messages_v1';
+
+  function getLocalMessages(){
+    try {
+      const raw = localStorage.getItem(CHAT_LOCAL_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveLocalMessages(messages){
+    try { localStorage.setItem(CHAT_LOCAL_KEY, JSON.stringify(messages)); } catch {}
+  }
+
+  function permissionDenied(err){
+    return !!err && (
+      err.code === 'permission-denied' ||
+      /permission|insufficient permissions/i.test(String(err.message || err))
+    );
+  }
+
+  function appendMessage(entry){
+    const data = entry && entry.data ? entry.data() : entry;
+    const name = data.name || 'Anônimo';
+    const text = data.text || '';
+    const createdAt = data.createdAt;
+    const ts = createdAt && createdAt.toDate ? createdAt.toDate() : (createdAt ? new Date(createdAt) : new Date());
+    const me = chatUser && chatUser.name === name;
+
+    const wrap = document.createElement('div');
+    const meta = document.createElement('div');
+    meta.className = 'chat-meta';
+    meta.textContent = `${name} • ${ts.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}`;
+
+    const bubble = document.createElement('div');
+    bubble.className = 'chat-bubble ' + (me ? 'me' : 'other');
+    bubble.textContent = text;
+
+    wrap.appendChild(meta);
+    wrap.appendChild(bubble);
+    chatMessages.appendChild(wrap);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+
+  function renderLocalChat(){
+    chatMessages.innerHTML = '';
+    getLocalMessages().forEach(msg => appendMessage(msg));
+  }
+
   if(elTabChat){
     elTabChat.addEventListener('click', ()=>{
       setActiveTab('chat');
@@ -2096,10 +2170,9 @@
     });
   }
 
-  // integrate with existing setActiveTab behavior
-  const prevSetActive = window.setActiveTab;
+  const prevSetActive = window.setActiveTab || function(){};
   window.setActiveTab = function(tab){
-    prevSetActive(tab);
+    prevSetActive.call(window, tab);
     if(tab === 'chat'){
       if(elViewChat) elViewChat.classList.add('active');
     } else {
@@ -2107,20 +2180,23 @@
     }
   };
 
-  // Simple local user (name-only)
-  const CHAT_USER_KEY = 'calendario_chat_user';
   let chatUser = null;
+  let chatUnsub = null;
 
   function loadChatUser(){
     try{ chatUser = JSON.parse(localStorage.getItem(CHAT_USER_KEY)); }catch{};
     updateAuthUI();
   }
+
   function saveChatUser(){
     try{ localStorage.setItem(CHAT_USER_KEY, JSON.stringify(chatUser)); }catch{};
     updateAuthUI();
   }
+
   function clearChatUser(){
-    chatUser = null; localStorage.removeItem(CHAT_USER_KEY); updateAuthUI();
+    chatUser = null;
+    localStorage.removeItem(CHAT_USER_KEY);
+    updateAuthUI();
   }
 
   function updateAuthUI(){
@@ -2144,101 +2220,145 @@
 
   async function ensureUserInDb(name){
     if(!window.__db) return;
-    const usersRef = window.__db.collection('chatUsers');
-    const q = await usersRef.where('name','==',name).limit(1).get();
-    if(q.empty){
-      await usersRef.add({ name, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+    try {
+      const usersRef = window.__db.collection('chatUsers');
+      const q = await usersRef.where('name','==',name).limit(1).get();
+      if(q.empty){
+        await usersRef.add({ name, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+      }
+    } catch(err) {
+      if(!permissionDenied(err)) console.warn('Não foi possível validar o usuário em nuvem:', err);
     }
   }
 
   chatCreateBtn.onclick = async ()=>{
     const name = (chatNameInput.value || '').trim();
-    if(!name) return showToast('Digite um nome para criar conta');
+    if(!name) return window.showToast('Digite um nome para criar conta');
     chatUser = { name };
     saveChatUser();
     await ensureUserInDb(name);
-    showToast('Conta criada como ' + name);
+    window.showToast('Conta criada como ' + name);
     startChatListener();
   };
 
   chatLoginBtn.onclick = async ()=>{
     const name = (chatNameInput.value || '').trim();
-    if(!name) return showToast('Digite seu nome para entrar');
+    if(!name) return window.showToast('Digite seu nome para entrar');
     if(window.__db){
-      const usersRef = window.__db.collection('chatUsers');
-      const q = await usersRef.where('name','==',name).limit(1).get();
-      if(q.empty){
-        if(!confirm('Usuário não encontrado. Deseja criar conta com esse nome?')) return;
-        await usersRef.add({ name, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+      try {
+        const usersRef = window.__db.collection('chatUsers');
+        const q = await usersRef.where('name','==',name).limit(1).get();
+        if(q.empty){
+          if(!confirm('Usuário não encontrado. Deseja criar conta com esse nome?')) return;
+          await usersRef.add({ name, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+        }
+      } catch(err) {
+        if(!permissionDenied(err)) console.warn('Não foi possível consultar usuários em nuvem:', err);
       }
     }
     chatUser = { name };
     saveChatUser();
-    showToast('Entrou como ' + name);
+    window.showToast('Entrou como ' + name);
     startChatListener();
   };
 
   chatLogoutBtn.onclick = ()=>{
     clearChatUser();
-    showToast('Desconectado');
+    window.showToast('Desconectado');
     stopChatListener();
   };
 
   chatSendBtn.onclick = sendChatMessage;
   chatMessageInput.addEventListener('keydown', e => { if(e.key === 'Enter') sendChatMessage(); });
 
-  function appendMessage(doc){
-    const data = doc.data ? doc.data() : doc;
-    const name = data.name || 'Anônimo';
-    const text = data.text || '';
-    const ts = data.createdAt && data.createdAt.toDate ? data.createdAt.toDate() : (data.createdAt ? new Date(data.createdAt) : new Date());
-    const me = chatUser && chatUser.name === name;
-    const wrap = document.createElement('div');
-    const meta = document.createElement('div'); meta.className = 'chat-meta'; meta.textContent = `${name} • ${ts.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}`;
-    const bubble = document.createElement('div'); bubble.className = 'chat-bubble ' + (me ? 'me' : 'other'); bubble.textContent = text;
-    wrap.appendChild(meta); wrap.appendChild(bubble);
-    chatMessages.appendChild(wrap);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-  }
-
-  let chatUnsub = null;
   function startChatListener(){
-    if(!window.__db) return;
+    if(!window.__db){
+      renderLocalChat();
+      return;
+    }
+
     const ref = window.__db.collection('chatMessages').orderBy('createdAt','asc').limit(500);
     if(chatUnsub) chatUnsub();
     chatMessages.innerHTML = '';
-    chatUnsub = ref.onSnapshot(snap => {
-      chatMessages.innerHTML = '';
-      snap.docs.forEach(doc => appendMessage(doc));
-    }, err => {
-      console.warn('Erro ao ouvir chat:', err);
-    });
+
+    try {
+      chatUnsub = ref.onSnapshot(snap => {
+        chatMessages.innerHTML = '';
+        snap.docs.forEach(doc => appendMessage(doc));
+      }, err => {
+        if(permissionDenied(err)) {
+          renderLocalChat();
+          return;
+        }
+        console.warn('Erro ao ouvir chat:', err);
+        renderLocalChat();
+      });
+    } catch(err) {
+      console.warn('Não foi possível abrir listener do chat:', err);
+      renderLocalChat();
+    }
   }
-  function stopChatListener(){ if(chatUnsub){ chatUnsub(); chatUnsub = null; chatMessages.innerHTML = ''; } }
+
+  function stopChatListener(){
+    if(chatUnsub){ chatUnsub(); chatUnsub = null; }
+    chatMessages.innerHTML = '';
+    renderLocalChat();
+  }
 
   async function sendChatMessage(){
     const text = (chatMessageInput.value || '').trim();
     if(!text) return;
-    if(!chatUser || !chatUser.name){ showToast('Faça login antes de enviar mensagens'); return; }
-    if(!window.__db){ showToast('Banco não disponível. O chat precisa de Firestore.'); return; }
-    try{
-      await window.__db.collection('chatMessages').add({ name: chatUser.name, text, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+    if(!chatUser || !chatUser.name){ window.showToast('Faça login antes de enviar mensagens'); return; }
+
+    const payload = { name: chatUser.name, text, createdAt: Date.now() };
+
+    if(!window.__db){
+      const messages = getLocalMessages();
+      messages.push(payload);
+      saveLocalMessages(messages);
       chatMessageInput.value = '';
-    }catch(err){ console.error(err); showToast('Erro ao enviar mensagem'); }
+      renderLocalChat();
+      window.showToast('Mensagem salva localmente no aparelho.');
+      return;
+    }
+
+    try {
+      await window.__db.collection('chatMessages').add({
+        name: chatUser.name,
+        text,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      chatMessageInput.value = '';
+    } catch(err) {
+      if(permissionDenied(err)) {
+        const messages = getLocalMessages();
+        messages.push(payload);
+        saveLocalMessages(messages);
+        chatMessageInput.value = '';
+        renderLocalChat();
+        window.showToast('Mensagem salva localmente. O chat online está bloqueado por permissão.');
+        return;
+      }
+      console.error(err);
+      window.showToast('Erro ao enviar mensagem');
+    }
   }
 
   function renderChat(){
     loadChatUser();
-    if(chatUser && window.__db) startChatListener();
+    if(chatUser){
+      startChatListener();
+    } else {
+      renderLocalChat();
+    }
   }
 
-  // init
   loadChatUser();
-  if(chatUser && window.__db) startChatListener();
+  renderChat();
 })();
 </script>
 <script>
-  if ('serviceWorker' in navigator) {
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('./sw-viewer.js').catch(err => {
         console.warn('Service worker não registrado (normal se o arquivo foi aberto direto, sem hospedagem):', err);
