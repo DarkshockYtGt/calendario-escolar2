@@ -2181,7 +2181,7 @@
   }
 </script>
 <script>
-// Chat feature: simple name-only auth + Firestore realtime messages
+// Chat feature: resilient auth + Firestore/local fallback
 (function(){
   const elTabChat = document.getElementById('tabChat');
   const elViewChat = document.getElementById('view-chat');
@@ -2195,6 +2195,10 @@
 
   const CHAT_USER_KEY = 'calendario_chat_user';
   const CHAT_LOCAL_KEY = 'calendario_chat_local_messages_v1';
+
+  function isFirestoreReady(){
+    return !!(window.__db && typeof window.__db.collection === 'function');
+  }
 
   function getLocalMessages(){
     try {
@@ -2217,10 +2221,21 @@
     );
   }
 
+  function formatMessageTime(value){
+    try {
+      const date = value && value.toDate ? value.toDate() : new Date(value || Date.now());
+      return date.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+    } catch {
+      return 'agora';
+    }
+  }
+
   function appendMessage(entry){
-    const data = entry && entry.data ? entry.data() : entry;
-    const name = data.name || 'Anônimo';
-    const text = data.text || '';
+    const data = (entry && typeof entry.data === 'function') ? entry.data() : entry;
+    if(!data || !data.text) return;
+
+    const name = String(data.name || 'Anônimo').trim() || 'Anônimo';
+    const text = String(data.text || '').trim();
     const createdAt = data.createdAt;
     const ts = createdAt && createdAt.toDate ? createdAt.toDate() : (createdAt ? new Date(createdAt) : new Date());
     const me = chatUser && chatUser.name === name;
@@ -2228,7 +2243,7 @@
     const wrap = document.createElement('div');
     const meta = document.createElement('div');
     meta.className = 'chat-meta';
-    meta.textContent = `${name} • ${ts.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}`;
+    meta.textContent = `${name} • ${formatMessageTime(ts)}`;
 
     const bubble = document.createElement('div');
     bubble.className = 'chat-bubble ' + (me ? 'me' : 'other');
@@ -2240,9 +2255,22 @@
     chatMessages.scrollTop = chatMessages.scrollHeight;
   }
 
-  function renderLocalChat(){
+  function showChatEmpty(message = 'Nenhuma mensagem ainda.'){ 
     chatMessages.innerHTML = '';
-    getLocalMessages().forEach(msg => appendMessage(msg));
+    const empty = document.createElement('div');
+    empty.className = 'chat-empty';
+    empty.textContent = message;
+    chatMessages.appendChild(empty);
+  }
+
+  function renderLocalChat(message = 'Nenhuma mensagem ainda.'){
+    const messages = getLocalMessages();
+    chatMessages.innerHTML = '';
+    if(!messages.length){
+      showChatEmpty(message);
+      return;
+    }
+    messages.forEach(msg => appendMessage(msg));
   }
 
   if(elTabChat){
@@ -2252,21 +2280,22 @@
     });
   }
 
-  const prevSetActive = window.setActiveTab || function(){};
-  window.setActiveTab = function(tab){
-    prevSetActive.call(window, tab);
-    if(tab === 'chat'){
-      if(elViewChat) elViewChat.classList.add('active');
-    } else {
-      if(elViewChat) elViewChat.classList.remove('active');
-    }
-  };
-
   let chatUser = null;
   let chatUnsub = null;
 
   function loadChatUser(){
-    try{ chatUser = JSON.parse(localStorage.getItem(CHAT_USER_KEY)); }catch{};
+    try {
+      const raw = localStorage.getItem(CHAT_USER_KEY);
+      chatUser = raw ? JSON.parse(raw) : null;
+    } catch {
+      chatUser = null;
+    }
+
+    if(chatUser && typeof chatUser.name === 'string' && chatUser.name.trim()){
+      return;
+    }
+    chatUser = null;
+    localStorage.removeItem(CHAT_USER_KEY);
     updateAuthUI();
   }
 
@@ -2291,6 +2320,7 @@
       chatSendBtn.disabled = false;
     } else {
       elChatUserChip.textContent = 'Anônimo';
+      chatNameInput.value = '';
       chatLoginBtn.style.display = '';
       chatLogoutBtn.style.display = 'none';
       chatMessageInput.disabled = true;
@@ -2298,80 +2328,75 @@
     }
   }
 
-  chatLoginBtn.onclick = async ()=>{
-    const name = (chatNameInput.value || '').trim();
-    if(!name) return window.showToast('Digite seu nome para entrar');
-    chatUser = { name };
-    saveChatUser();
-    window.showToast('Entrou como ' + name);
-    startChatListener();
-  };
-
-  chatLogoutBtn.onclick = ()=>{
-    clearChatUser();
-    window.showToast('Desconectado');
-    stopChatListener();
-  };
-
-  chatSendBtn.onclick = sendChatMessage;
-  chatMessageInput.addEventListener('keydown', e => { if(e.key === 'Enter') sendChatMessage(); });
-
   function startChatListener(){
-    if(!window.__db){
-      renderLocalChat();
+    if(!isFirestoreReady()){
+      renderLocalChat('O chat local está pronto. Faça login para enviar mensagens.');
       return;
     }
 
-    const ref = window.__db.collection('chatMessages').orderBy('createdAt','asc').limit(500);
-    if(chatUnsub) chatUnsub();
-    chatMessages.innerHTML = '';
-
     try {
-      chatUnsub = ref.onSnapshot(snap => {
+      if(chatUnsub) chatUnsub();
+      const ref = window.__db.collection('chatMessages').orderBy('createdAt', 'asc').limit(500);
+      chatMessages.innerHTML = '';
+      chatUnsub = ref.onSnapshot((snap) => {
         chatMessages.innerHTML = '';
-        snap.docs.forEach(doc => appendMessage(doc));
-      }, err => {
-        if(permissionDenied(err)) {
-          renderLocalChat();
+        if(!snap.size){
+          showChatEmpty('Nenhuma mensagem ainda.');
           return;
         }
-        console.warn('Erro ao ouvir chat:', err);
-        renderLocalChat();
+        snap.docs.forEach(doc => appendMessage(doc));
+      }, (err) => {
+        if(permissionDenied(err)){
+          renderLocalChat('O painel de avisos está em modo local por falta de permissão no Firebase.');
+          return;
+        }
+        console.warn('Erro ao escutar o chat:', err);
+        renderLocalChat('Não foi possível sincronizar com o Firebase. O chat local foi ativado.');
       });
     } catch(err) {
-      console.warn('Não foi possível abrir listener do chat:', err);
-      renderLocalChat();
+      console.warn('Não foi possível abrir o listener do chat:', err);
+      renderLocalChat('O chat local está ativo por enquanto.');
     }
   }
 
   function stopChatListener(){
-    if(chatUnsub){ chatUnsub(); chatUnsub = null; }
-    chatMessages.innerHTML = '';
-    renderLocalChat();
+    if(chatUnsub){
+      chatUnsub();
+      chatUnsub = null;
+    }
+    renderLocalChat('Você saiu. Faça login para voltar ao chat.');
   }
 
   async function sendChatMessage(){
     const text = (chatMessageInput.value || '').trim();
     if(!text) return;
-    if(!chatUser || !chatUser.name){ window.showToast('Faça login antes de enviar mensagens'); return; }
+
+    if(!chatUser || !chatUser.name){
+      window.showToast ? window.showToast('Faça login antes de enviar mensagens') : alert('Faça login antes de enviar mensagens');
+      return;
+    }
 
     const payload = { name: chatUser.name, text, createdAt: Date.now() };
 
-    if(!window.__db){
+    if(!isFirestoreReady()){
       const messages = getLocalMessages();
       messages.push(payload);
       saveLocalMessages(messages);
       chatMessageInput.value = '';
       renderLocalChat();
-      window.showToast('Mensagem salva localmente no aparelho.');
+      window.showToast ? window.showToast('Mensagem salva localmente no aparelho.') : null;
       return;
     }
 
     try {
+      const tsValue = window.firebase && window.firebase.firestore && window.firebase.firestore.FieldValue
+        ? window.firebase.firestore.FieldValue.serverTimestamp()
+        : Date.now();
+
       await window.__db.collection('chatMessages').add({
         name: chatUser.name,
         text,
-        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        createdAt: tsValue
       });
       chatMessageInput.value = '';
     } catch(err) {
@@ -2381,22 +2406,58 @@
         saveLocalMessages(messages);
         chatMessageInput.value = '';
         renderLocalChat();
-        window.showToast('Mensagem salva localmente. O chat online está bloqueado por permissão.');
+        window.showToast ? window.showToast('Mensagem salva localmente. O painel online está bloqueado por permissão.') : null;
         return;
       }
       console.error(err);
-      window.showToast('Erro ao enviar mensagem');
+      window.showToast ? window.showToast('Erro ao enviar mensagem') : null;
     }
   }
 
   function renderChat(){
     loadChatUser();
-    if(chatUser){
+    if(chatUser && chatUser.name){
       startChatListener();
     } else {
-      renderLocalChat();
+      renderLocalChat('Faça login para ver e enviar avisos.');
     }
   }
+
+  chatLoginBtn.onclick = ()=>{
+    const name = (chatNameInput.value || '').trim();
+    if(!name) {
+      window.showToast ? window.showToast('Digite seu nome para entrar') : alert('Digite seu nome para entrar');
+      return;
+    }
+    chatUser = { name };
+    saveChatUser();
+    window.showToast ? window.showToast('Entrou como ' + name) : null;
+    renderChat();
+  };
+
+  chatLogoutBtn.onclick = ()=>{
+    clearChatUser();
+    window.showToast ? window.showToast('Desconectado') : null;
+    stopChatListener();
+  };
+
+  chatSendBtn.onclick = sendChatMessage;
+  chatMessageInput.addEventListener('keydown', (e) => {
+    if(e.key === 'Enter') {
+      e.preventDefault();
+      if(!chatUser || !chatUser.name){
+        chatLoginBtn.click();
+      } else {
+        sendChatMessage();
+      }
+    }
+  });
+  chatNameInput.addEventListener('keydown', (e) => {
+    if(e.key === 'Enter') {
+      e.preventDefault();
+      chatLoginBtn.click();
+    }
+  });
 
   loadChatUser();
   renderChat();
