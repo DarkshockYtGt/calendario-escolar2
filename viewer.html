@@ -1263,6 +1263,7 @@
     if(el.statusRow) el.statusRow.style.display = 'none';
   }
   const nowForWeek = new Date();
+  const weekAnchorDate = weekStart(nowForWeek);
   const defaultWeekOffset = (nowForWeek.getDay() === 0 || nowForWeek.getDay() === 6) ? 1 : 0;
   const savedWeekStart = parseLocalDateKey(state.weekStartKey);
   const savedOffset = Number.isFinite(state.currentWeekOffset) ? state.currentWeekOffset : null;
@@ -1276,6 +1277,16 @@
   } else {
     currentWeekOffset = defaultWeekOffset;
   }
+  state.tasks = Array.isArray(state.tasks) ? state.tasks.map(task => {
+    if(!task || typeof task !== 'object') return task;
+    const normalized = { ...task };
+    const fallbackWeekOffset = Number.isFinite(Number(normalized.weekOffset)) ? Number(normalized.weekOffset) : currentWeekOffset;
+    normalized.weekOffset = Number.isFinite(Number(normalized.weekOffset)) ? Number(normalized.weekOffset) : fallbackWeekOffset;
+    if(!normalized.weekKey || !/^\d{4}-\d{2}-\d{2}$/.test(normalized.weekKey)) {
+      normalized.weekKey = weekKeyForOffset(normalized.weekOffset);
+    }
+    return normalized;
+  }) : [];
   let activeTab = 'calendar';
   let selectedStatus = 'não feito';
   let editingId = null;
@@ -1310,8 +1321,18 @@
 
   function saveState(){
     try{
+      const normalizedTasks = state.tasks.map(task => {
+        if(!task || typeof task !== 'object') return task;
+        const normalized = { ...task };
+        const fallbackOffset = Number.isFinite(Number(normalized.weekOffset)) ? Number(normalized.weekOffset) : currentWeekOffset;
+        normalized.weekOffset = Number.isFinite(Number(normalized.weekOffset)) ? Number(normalized.weekOffset) : fallbackOffset;
+        normalized.weekKey = normalized.weekKey && /^\d{4}-\d{2}-\d{2}$/.test(normalized.weekKey)
+          ? normalized.weekKey
+          : weekKeyForOffset(normalized.weekOffset);
+        return normalized;
+      });
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        tasks: state.tasks,
+        tasks: normalizedTasks,
         currentWeekOffset,
         // Preserve previously-saved weekStartKey when present to avoid
         // sobrescrever a referência de semana em salvamentos automáticos.
@@ -1426,9 +1447,7 @@
   }
 
   function dateForWeekDay(weekOffset, dayIndex){
-    const d = weekStart(new Date());
-    d.setDate(d.getDate() + weekOffset * 7 + dayIndex);
-    return d;
+    return dateForWeekKey(weekKeyForOffset(weekOffset), dayIndex);
   }
 
   function formatShort(date){
@@ -1461,12 +1480,32 @@
     return Math.round(ms / 604800000);
   }
 
+  function weekKeyForOffset(offset, baseDate = weekAnchorDate){
+    const start = weekStart(baseDate);
+    start.setDate(start.getDate() + Number(offset || 0) * 7);
+    return localDateKey(start);
+  }
+
+  function taskWeekKey(task){
+    if(task && typeof task.weekKey === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(task.weekKey)) return task.weekKey;
+    if(task && Number.isFinite(Number(task.weekOffset))) return weekKeyForOffset(Number(task.weekOffset));
+    return null;
+  }
+
+  function dateForWeekKey(weekKey, dayIndex){
+    const keyDate = parseLocalDateKey(weekKey) || weekStart(new Date());
+    const d = new Date(keyDate);
+    d.setDate(d.getDate() + Number(dayIndex || 0));
+    return d;
+  }
+
   function taskStatus(task){
     return IS_VIEWER ? 'não feito' : (task.status || 'não feito');
   }
 
   function slotProgress(weekOffset, dayIndex, subject){
-    const items = state.tasks.filter(t => t.weekOffset === weekOffset && t.mode === 'day' && Number(t.day) === dayIndex && t.subject === subject);
+    const targetWeekKey = weekKeyForOffset(weekOffset);
+    const items = state.tasks.filter(t => taskWeekKey(t) === targetWeekKey && t.mode === 'day' && Number(t.day) === dayIndex && t.subject === subject);
     if(!items.length) return { kind: 'none', count: 0 };
     if(IS_VIEWER) return { kind: 'todo', count: items.length };
     const statuses = items.map(t => t.status || 'não feito');
@@ -1535,7 +1574,8 @@
 
   function resolveDue(task){
     if(task.mode === 'day'){
-      const d = dateForWeekDay(task.weekOffset, Number(task.day));
+      const weekKey = taskWeekKey(task) || weekKeyForOffset(Number(task.weekOffset || 0));
+      const d = dateForWeekKey(weekKey, Number(task.day));
       return { date: d, label: `${weekNames[Number(task.day)]} • ${formatShort(d)}` };
     }
     const subj = task.nextClassSubject || task.subject;
@@ -1545,11 +1585,13 @@
   }
 
   function tasksForWeek(offset){
-    return state.tasks.filter(t => t.weekOffset === offset);
+    const targetWeekKey = weekKeyForOffset(offset);
+    return state.tasks.filter(t => taskWeekKey(t) === targetWeekKey || (!t.weekKey && Number(t.weekOffset) === offset));
   }
 
   function countForSlot(weekOffset, dayIndex, subject){
-    return state.tasks.filter(t => t.weekOffset === weekOffset && t.mode === 'day' && Number(t.day) === dayIndex && t.subject === subject).length;
+    const targetWeekKey = weekKeyForOffset(weekOffset);
+    return state.tasks.filter(t => (taskWeekKey(t) === targetWeekKey || (!t.weekKey && Number(t.weekOffset) === weekOffset)) && t.mode === 'day' && Number(t.day) === dayIndex && t.subject === subject).length;
   }
 
   function renderCalendar(){
@@ -1780,6 +1822,7 @@
       subject: el.taskSubject.value,
       mode,
       weekOffset: currentWeekOffset,
+      weekKey: weekKeyForOffset(currentWeekOffset),
       day: mode === 'day' ? Number(el.taskDay.value) : null,
       nextClassSubject: mode === 'nextClass' ? el.taskNextClass.value : null,
       pages: el.taskPages.value.trim(),

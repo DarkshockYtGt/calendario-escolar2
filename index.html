@@ -930,6 +930,7 @@
                 <label for="taskMode">Pra quando?</label>
                 <select id="taskMode">
                   <option value="day">Dia da semana</option>
+                  <option value="date">Data específica</option>
                   <option value="nextClass">Próxima aula</option>
                 </select>
               </div>
@@ -938,6 +939,11 @@
                 <label for="taskDay">Dia</label>
                 <select id="taskDay"></select>
                 <div class="form-hint" id="dayHint">Só aparecem os dias em que essa matéria existe.</div>
+              </div>
+
+              <div class="field" id="dateField" style="display:none;">
+                <label for="taskDate">Data</label>
+                <input id="taskDate" type="date" />
               </div>
 
               <div class="field" id="nextClassField" style="display:none;">
@@ -996,6 +1002,20 @@
                 <button class="filter-pill active" data-filter="pending">Pendentes</button>
                 <button class="filter-pill" data-filter="completed">Concluídas</button>
                 <button class="filter-pill" data-filter="all">Todas</button>
+              </div>
+              <div class="filter-pills" style="margin-top:8px;">
+                <select id="taskScopeSelect" aria-label="Escopo das tarefas" style="min-width:140px; border-radius:12px; padding:8px 10px; background:var(--surface-2); color:var(--text); border:1px solid var(--line);">
+                  <option value="current">Só esta semana</option>
+                  <option value="all">Todas as semanas</option>
+                </select>
+                <select id="taskSortSelect" aria-label="Ordenar tarefas" style="min-width:180px; border-radius:12px; padding:8px 10px; background:var(--surface-2); color:var(--text); border:1px solid var(--line);">
+                  <option value="near">Mais próximas</option>
+                  <option value="far">Mais longes</option>
+                  <option value="alphabetical">Ordem alfabética</option>
+                  <option value="length">Maior quantidade de caracteres</option>
+                  <option value="status">Status</option>
+                  <option value="week">Por semana</option>
+                </select>
               </div>
             </div>
             <div class="pending-list" id="pendingList"></div>
@@ -1204,6 +1224,7 @@
     taskSubject: document.getElementById('taskSubject'),
     taskMode: document.getElementById('taskMode'),
     taskDay: document.getElementById('taskDay'),
+    taskDate: document.getElementById('taskDate'),
     taskNextClass: document.getElementById('taskNextClass'),
     taskPages: document.getElementById('taskPages'),
     taskNote: document.getElementById('taskNote'),
@@ -1242,16 +1263,29 @@
     if(el.statusRow) el.statusRow.style.display = 'none';
   }
   const nowForWeek = new Date();
+  const weekAnchorDate = weekStart(nowForWeek);
   const defaultWeekOffset = (nowForWeek.getDay() === 0 || nowForWeek.getDay() === 6) ? 1 : 0;
   const savedWeekStart = parseLocalDateKey(state.weekStartKey);
   const savedOffset = Number.isFinite(state.currentWeekOffset) ? state.currentWeekOffset : defaultWeekOffset;
   let currentWeekOffset = savedWeekStart
     ? Math.max(savedOffset - weekDiffWeeks(nowForWeek, savedWeekStart), defaultWeekOffset)
     : defaultWeekOffset;
+  state.tasks = Array.isArray(state.tasks) ? state.tasks.map(task => {
+    if(!task || typeof task !== 'object') return task;
+    const normalized = { ...task };
+    const fallbackWeekOffset = Number.isFinite(Number(normalized.weekOffset)) ? Number(normalized.weekOffset) : currentWeekOffset;
+    normalized.weekOffset = Number.isFinite(Number(normalized.weekOffset)) ? Number(normalized.weekOffset) : fallbackWeekOffset;
+    if(!normalized.weekKey || !/^\d{4}-\d{2}-\d{2}$/.test(normalized.weekKey)) {
+      normalized.weekKey = weekKeyForOffset(normalized.weekOffset);
+    }
+    return normalized;
+  }) : [];
   let activeTab = 'calendar';
   let selectedStatus = 'não feito';
   let editingId = null;
   let activeTaskFilter = 'pending';
+  let taskSortMode = 'near';
+  let taskScopeMode = 'current';
   let colors = {...defaults.colors, ...(state.colors || {})};
   let theme = state.theme || defaults.theme;
 
@@ -1282,8 +1316,18 @@
 
   function saveState(){
     try{
+      const normalizedTasks = state.tasks.map(task => {
+        if(!task || typeof task !== 'object') return task;
+        const normalized = { ...task };
+        const fallbackOffset = Number.isFinite(Number(normalized.weekOffset)) ? Number(normalized.weekOffset) : currentWeekOffset;
+        normalized.weekOffset = Number.isFinite(Number(normalized.weekOffset)) ? Number(normalized.weekOffset) : fallbackOffset;
+        normalized.weekKey = normalized.weekKey && /^\d{4}-\d{2}-\d{2}$/.test(normalized.weekKey)
+          ? normalized.weekKey
+          : weekKeyForOffset(normalized.weekOffset);
+        return normalized;
+      });
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        tasks: state.tasks,
+        tasks: normalizedTasks,
         currentWeekOffset,
         weekStartKey: localDateKey(weekStart(new Date())),
         colors,
@@ -1387,9 +1431,7 @@
   }
 
   function dateForWeekDay(weekOffset, dayIndex){
-    const d = weekStart(new Date());
-    d.setDate(d.getDate() + weekOffset * 7 + dayIndex);
-    return d;
+    return dateForWeekKey(weekKeyForOffset(weekOffset), dayIndex);
   }
 
   function formatShort(date){
@@ -1422,12 +1464,32 @@
     return Math.round(ms / 604800000);
   }
 
+  function weekKeyForOffset(offset, baseDate = weekAnchorDate){
+    const start = weekStart(baseDate);
+    start.setDate(start.getDate() + Number(offset || 0) * 7);
+    return localDateKey(start);
+  }
+
+  function taskWeekKey(task){
+    if(task && typeof task.weekKey === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(task.weekKey)) return task.weekKey;
+    if(task && Number.isFinite(Number(task.weekOffset))) return weekKeyForOffset(Number(task.weekOffset));
+    return null;
+  }
+
+  function dateForWeekKey(weekKey, dayIndex){
+    const keyDate = parseLocalDateKey(weekKey) || weekStart(new Date());
+    const d = new Date(keyDate);
+    d.setDate(d.getDate() + Number(dayIndex || 0));
+    return d;
+  }
+
   function taskStatus(task){
     return IS_VIEWER ? 'não feito' : (task.status || 'não feito');
   }
 
   function slotProgress(weekOffset, dayIndex, subject){
-    const items = state.tasks.filter(t => t.weekOffset === weekOffset && t.mode === 'day' && Number(t.day) === dayIndex && t.subject === subject);
+    const targetWeekKey = weekKeyForOffset(weekOffset);
+    const items = state.tasks.filter(t => taskWeekKey(t) === targetWeekKey && t.mode === 'day' && Number(t.day) === dayIndex && t.subject === subject);
     if(!items.length) return { kind: 'none', count: 0 };
     if(IS_VIEWER) return { kind: 'todo', count: items.length };
     const statuses = items.map(t => t.status || 'não feito');
@@ -1496,8 +1558,13 @@
 
   function resolveDue(task){
     if(task.mode === 'day'){
-      const d = dateForWeekDay(task.weekOffset, Number(task.day));
+      const weekKey = taskWeekKey(task) || weekKeyForOffset(Number(task.weekOffset || 0));
+      const d = dateForWeekKey(weekKey, Number(task.day));
       return { date: d, label: `${weekNames[Number(task.day)]} • ${formatShort(d)}` };
+    }
+    if(task.mode === 'date' && task.date){
+      const d = new Date(`${task.date}T00:00:00`);
+      return { date: d, label: `${d.toLocaleDateString('pt-BR', { weekday:'long', day:'2-digit', month:'2-digit' })}` };
     }
     const subj = task.nextClassSubject || task.subject;
     const next = nextOccurrence(subj, new Date());
@@ -1506,11 +1573,29 @@
   }
 
   function tasksForWeek(offset){
-    return state.tasks.filter(t => t.weekOffset === offset);
+    const targetWeekKey = weekKeyForOffset(offset);
+    return state.tasks.filter(t => taskWeekKey(t) === targetWeekKey || (!t.weekKey && Number(t.weekOffset) === offset));
+  }
+
+  function tasksForScope(scope = taskScopeMode){
+    if(scope === 'all') return [...state.tasks];
+    return tasksForWeek(currentWeekOffset);
+  }
+
+  function sortTasks(tasks, mode = taskSortMode){
+    const ordered = [...tasks];
+    if(mode === 'alphabetical') return ordered.sort((a, b) => (a.subject || '').localeCompare(b.subject || '') || String(resolveDue(a).date).localeCompare(String(resolveDue(b).date)));
+    if(mode === 'far') return ordered.sort((a, b) => resolveDue(b).date - resolveDue(a).date);
+    if(mode === 'length') return ordered.sort((a, b) => String(b.subject || '').length - String(a.subject || '').length || resolveDue(a).date - resolveDue(b).date);
+    if(mode === 'status') return ordered.sort((a, b) => ((taskStatus(a) === 'concluído' ? 1 : 0) - (taskStatus(b) === 'concluído' ? 1 : 0)) || resolveDue(a).date - resolveDue(b).date);
+    if(mode === 'week') return ordered.sort((a, b) => (taskWeekKey(a) || weekKeyForOffset(Number(a.weekOffset || 0))) .localeCompare(taskWeekKey(b) || weekKeyForOffset(Number(b.weekOffset || 0))) || resolveDue(a).date - resolveDue(b).date);
+    if(mode === 'date') return ordered.sort((a, b) => resolveDue(a).date - resolveDue(b).date);
+    return ordered.sort((a, b) => resolveDue(a).date - resolveDue(b).date);
   }
 
   function countForSlot(weekOffset, dayIndex, subject){
-    return state.tasks.filter(t => t.weekOffset === weekOffset && t.mode === 'day' && Number(t.day) === dayIndex && t.subject === subject).length;
+    const targetWeekKey = weekKeyForOffset(weekOffset);
+    return state.tasks.filter(t => (taskWeekKey(t) === targetWeekKey || (!t.weekKey && Number(t.weekOffset) === weekOffset)) && t.mode === 'day' && Number(t.day) === dayIndex && t.subject === subject).length;
   }
 
   function renderCalendar(){
@@ -1549,7 +1634,7 @@
 
   function renderPending(){
     const searchTerm = el.taskSearchInput ? el.taskSearchInput.value.toLowerCase().trim() : '';
-    let filteredTasks = tasksForWeek(currentWeekOffset);
+    let filteredTasks = tasksForScope(taskScopeMode);
 
     if (activeTaskFilter === 'pending') {
       filteredTasks = filteredTasks.filter(t => taskStatus(t) !== 'concluído');
@@ -1559,15 +1644,15 @@
 
     if (searchTerm) {
       filteredTasks = filteredTasks.filter(t => 
-        t.subject.toLowerCase().includes(searchTerm) ||
+        (t.subject || '').toLowerCase().includes(searchTerm) ||
         (t.note && t.note.toLowerCase().includes(searchTerm)) ||
         (t.pages && t.pages.toLowerCase().includes(searchTerm))
       );
     }
 
-    filteredTasks.sort((a,b) => resolveDue(a).date - resolveDue(b).date);
+    filteredTasks = sortTasks(filteredTasks, taskSortMode);
 
-    const totalPendingInWeek = tasksForWeek(currentWeekOffset).filter(t => taskStatus(t) !== 'concluído').length;
+    const totalPendingInWeek = tasksForScope(taskScopeMode).filter(t => taskStatus(t) !== 'concluído').length;
     el.pendingCountChip.textContent = `${filteredTasks.length} exibida${filteredTasks.length === 1 ? '' : 's'}`;
     el.pendingChip.textContent = `${totalPendingInWeek} pendentes`;
 
@@ -1634,7 +1719,10 @@
       const dayIdx = Number(el.taskDay.value || 0);
       const due = dateForWeekDay(currentWeekOffset, dayIdx);
       el.taskPreview.textContent = `${subject} vai aparecer em ${weekNames[dayIdx]} • ${formatShort(due)}.`;
-    }else{
+    } else if(mode === 'date') {
+      const due = el.taskDate.value ? new Date(`${el.taskDate.value}T00:00:00`) : new Date();
+      el.taskPreview.textContent = `${subject} vai aparecer na data ${due.toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' })}.`;
+    } else {
       const next = nextOccurrence(el.taskNextClass.value || subject, new Date());
       el.taskPreview.textContent = next
         ? `${subject} vai aparecer na próxima aula de ${el.taskNextClass.value} • ${next.date.toLocaleDateString('pt-BR', { weekday:'long', day:'2-digit', month:'2-digit' })} às ${next.time}.`
@@ -1677,10 +1765,12 @@
       el.taskSubject.value = prefill.subject || subjects[0];
       el.taskMode.value = prefill.mode || 'day';
       selectedStatus = prefill.status || 'não feito';
-      if(el.taskMode.value === 'day'){
+        if(el.taskMode.value === 'day'){
         populateTaskDayOptions(el.taskSubject.value, prefill.day);
         el.taskDay.value = String(prefill.day ?? el.taskDay.value);
-      }else{
+      } else if (el.taskMode.value === 'date') {
+        el.taskDate.value = prefill.date || new Date().toISOString().slice(0, 10);
+      } else {
         populateTaskDayOptions(el.taskSubject.value, prefill.day);
       }
       el.taskNextClass.value = prefill.nextClassSubject || el.taskSubject.value;
@@ -1701,6 +1791,8 @@
 
   function syncModeFields(){
     const mode = el.taskMode.value;
+    const dateField = document.getElementById('dateField');
+    if (dateField) dateField.style.display = mode === 'date' ? '' : 'none';
     el.nextClassField.style.display = mode === 'nextClass' ? '' : 'none';
     el.taskDay.closest('.field').style.display = mode === 'day' ? '' : 'none';
     renderTaskPreview();
@@ -1712,6 +1804,7 @@
     el.taskMode.value = 'day';
     selectedStatus = 'não feito';
     populateTaskDayOptions(el.taskSubject.value, 0);
+    el.taskDate.value = new Date().toISOString().slice(0, 10);
     el.taskNextClass.value = subjects[0];
     el.taskPages.value = '';
     el.taskNote.value = '';
@@ -1727,12 +1820,16 @@
       return;
     }
     const mode = el.taskMode.value;
+    const taskDate = mode === 'date' ? el.taskDate.value : '';
+    const weekAnchor = taskDate ? weekKeyForOffset(0, new Date(`${taskDate}T00:00:00`)) : weekKeyForOffset(currentWeekOffset);
     const task = {
       id: editingId || uid(),
       subject: el.taskSubject.value,
       mode,
       weekOffset: currentWeekOffset,
+      weekKey: weekAnchor,
       day: mode === 'day' ? Number(el.taskDay.value) : null,
+      date: mode === 'date' ? taskDate : null,
       nextClassSubject: mode === 'nextClass' ? el.taskNextClass.value : null,
       pages: el.taskPages.value.trim(),
       status: selectedStatus,
@@ -1919,6 +2016,20 @@
   };
   el.tabPending.onclick = () => { setActiveTab('pending'); renderPending(); };
 
+  if (el.taskSortSelect) {
+    el.taskSortSelect.addEventListener('change', () => {
+      taskSortMode = el.taskSortSelect.value;
+      renderPending();
+    });
+  }
+
+  if (el.taskScopeSelect) {
+    el.taskScopeSelect.addEventListener('change', () => {
+      taskScopeMode = el.taskScopeSelect.value;
+      renderPending();
+    });
+  }
+
   el.todayBtn.onclick = () => {
     currentWeekOffset = 0;
     saveState();
@@ -2045,6 +2156,9 @@
   applyTheme();
   renderSettings();
   populateTaskDayOptions(subjects[0], 0);
+  el.taskDate.value = new Date().toISOString().slice(0, 10);
+  if (el.taskSortSelect) el.taskSortSelect.value = taskSortMode;
+  if (el.taskScopeSelect) el.taskScopeSelect.value = taskScopeMode;
   syncStatusButtons();
   syncModeFields();
   renderCalendar();
